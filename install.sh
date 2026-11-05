@@ -2,11 +2,14 @@
 #
 # install.sh  流量对等脚本一键安装
 #
+# 远程一键模式（国内推荐，走 gh-proxy 加速）：
+#   curl -fsSL https://v4.gh-proxy.org/https://raw.githubusercontent.com/2253845067/traffic-balancer/main/install.sh | bash
+#
+# 远程一键模式（GitHub 直连）：
+#   curl -fsSL https://raw.githubusercontent.com/2253845067/traffic-balancer/main/install.sh | bash
+#
 # 本地仓库模式（在 clone 下来的目录里）：
 #   bash install.sh
-#
-# 远程一键模式：
-#   curl -fsSL https://raw.githubusercontent.com/2253845067/traffic-balancer/main/install.sh | bash
 #
 # 选项：
 #   --force        用仓库里的模板覆盖 /etc/traffic-balancer.conf（默认保留已有配置）
@@ -17,13 +20,15 @@
 #   --purge        与 --uninstall 一起用，同时删除状态目录与日志
 #   -h, --help     显示帮助
 #
-# 可用环境变量覆盖：REPO_SLUG、BRANCH、RAW_BASE（决定远程模式下从哪下载）、CRON_MINUTE
+# 可用环境变量覆盖：REPO_SLUG、BRANCH、GH_PROXY、RAW_BASE、CRON_MINUTE
+#   GH_PROXY 为空字符串表示不走加速、只直连：GH_PROXY= bash install.sh
 
 set -uo pipefail
 
 REPO_SLUG="${REPO_SLUG:-2253845067/traffic-balancer}"
-RAW_BASE="${RAW_BASE:-}"
 BRANCH="${BRANCH:-}"
+GH_PROXY="${GH_PROXY-https://v4.gh-proxy.org}"   # 默认走 gh-proxy 加速；置空则直连
+RAW_BASE="${RAW_BASE:-}"
 BIN_PATH="/usr/local/bin/traffic-balancer.sh"
 CONF_PATH="/etc/traffic-balancer.conf"
 STATE_DIR="/var/lib/traffic-balancer"
@@ -49,7 +54,7 @@ warn() { printf '%s[注意]%s %s\n' "$c_yel" "$c_off" "$*"; }
 die()  { printf '%s[错误]%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-usage() { sed -n '3,22p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '3,27p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -102,6 +107,20 @@ ensure_deps() {
 }
 
 #---------------------------------------------------------- 取文件 ----------
+# 生成候选下载前缀：加速地址优先（若配置），其次 GitHub 直连
+source_bases() {
+    local branch origin
+    if [ -n "$RAW_BASE" ]; then
+        printf '%s' "$RAW_BASE"
+        return 0
+    fi
+    for branch in ${BRANCH:-main master}; do
+        origin="https://raw.githubusercontent.com/$REPO_SLUG/$branch"
+        [ -n "$GH_PROXY" ] && printf '%s ' "${GH_PROXY%/}/$origin"
+        printf '%s ' "$origin"
+    done
+}
+
 resolve_source() {
     local self="${BASH_SOURCE[0]:-}"
     if [ -n "$self" ] && [ -f "$self" ]; then
@@ -114,16 +133,18 @@ resolve_source() {
         return 0
     fi
 
-    local bases="$RAW_BASE"
-    if [ -z "$bases" ]; then
-        if [ -n "$BRANCH" ]; then
-            bases="https://raw.githubusercontent.com/$REPO_SLUG/$BRANCH"
-        else
-            bases="https://raw.githubusercontent.com/$REPO_SLUG/main https://raw.githubusercontent.com/$REPO_SLUG/master"
-        fi
+    local bases
+    bases=$(source_bases)
+    [ -n "${bases// /}" ] || die "没有可用的下载地址（RAW_BASE 为空）"
+
+    if [ -n "$RAW_BASE" ]; then
+        info "从自定义下载源获取安装文件：$RAW_BASE"
+    elif [ -n "$GH_PROXY" ]; then
+        info "从 GitHub 下载安装文件（加速：$GH_PROXY，失败自动回退直连）…"
+    else
+        info "从 GitHub 下载安装文件（直连）…"
     fi
 
-    info "从 GitHub 下载安装文件…"
     STAGE=$(mktemp -d) || die "无法创建临时目录"
     trap 'rm -rf "$STAGE"' EXIT
 
@@ -131,12 +152,14 @@ resolve_source() {
     for f in traffic-balancer.sh traffic-balancer.conf; do
         ok=0
         for url in $bases; do
-            if curl -fsSL --retry 2 --connect-timeout 10 --max-time 120 "$url/$f" -o "$STAGE/$f" 2>/dev/null; then
+            if curl -fsSL --retry 1 --connect-timeout 8 --max-time 60 "$url/$f" -o "$STAGE/$f" 2>/dev/null; then
                 ok=1
+                info "已获取 $f"
                 break
             fi
         done
-        [ "$ok" -eq 1 ] || die "下载 $f 失败。请确认仓库已推送且文件名正确，或改用本地模式：bash install.sh（下载源：$bases）"
+        [ "$ok" -eq 1 ] || die "下载 $f 失败。请确认仓库已推送且文件名正确，或改用本地模式：bash install.sh
+尝试过的地址：$bases"
     done
     bash -n "$STAGE/traffic-balancer.sh" || die "下载的脚本语法校验失败"
     SRC_DIR="$STAGE"
